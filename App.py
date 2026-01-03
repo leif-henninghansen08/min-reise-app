@@ -1,36 +1,40 @@
 import streamlit as st
 import requests
 import folium
-from streamlit_folium import folium_static
 from datetime import datetime, timedelta
 
-# --- GRUNNLEGGENDE OPPSETT ---
-st.set_page_config(page_title="SikkerTur Pro", page_icon="🛡️", layout="wide")
+# --- 1. OPPSETT ---
+st.set_page_config(page_title="SikkerTur Stabil", page_icon="🚗", layout="wide")
 
-# --- DIN API-NØKKEL ---
-API_KEY = "AIzaSyBk2ZqtmrPjWeZc6eZiIPyZ5p4VuWsc1ww"
+# --- 2. SIKKER HENTING AV API-NØKKEL ---
+# Denne henter nøkkelen fra Streamlit Cloud Settings -> Secrets
+try:
+    API_KEY = st.secrets["google_maps_api_key"]
+except KeyError:
+    st.error("API-nøkkel mangler! Vennligst legg til 'google_maps_api_key' i Streamlit Secrets.")
+    st.stop()
 
-# --- HJELPEFUNKSJONER ---
+# --- 3. INITIALISER MINNE ---
+if "kart_html" not in st.session_state:
+    st.session_state.kart_html = None
+if "tabell_data" not in st.session_state:
+    st.session_state.tabell_data = None
+if "reise_tekst" not in st.session_state:
+    st.session_state.reise_tekst = None
+
+# --- 4. HJELPEFUNKSJONER ---
 def hent_stedsnavn(lat, lon):
     url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&key={API_KEY}&language=no&result_type=locality|administrative_area_level_2"
     try:
         res = requests.get(url).json()
-        return res['results'][0]['address_components'][0]['long_name'] if res['status'] == 'OK' else "Langs veien"
+        return res['results'][0]['address_components'][0]['long_name'] if res['status'] == 'OK' else "Vei"
     except: return "Norge"
 
-def finn_ladestasjoner(lat, lon):
-    url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lon}&radius=5000&type=electric_vehicle_charging_station&key={API_KEY}"
-    try:
-        res = requests.get(url).json()
-        return [p['name'] for p in res['results'][:3]] if res['status'] == 'OK' else []
-    except: return []
-
 def hent_vaer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/15.0'}
-    url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat},{lon}"
+    headers = {'User-Agent': 'SikkerTurApp/20.0'}
+    url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat}&lon={lon}"
     try:
         r = requests.get(url, headers=headers).json()
-        # Finn vær nærmest ankomsttid
         v = min(r['properties']['timeseries'], key=lambda x: abs((datetime.fromisoformat(x['time'].replace('Z', '+00:00')) - tid.replace(tzinfo=None)).total_seconds()))
         d = v['data']['instant']['details']
         nb = v['data'].get('next_1_hours', {}).get('details', {}).get('precipitation_amount', 0)
@@ -39,45 +43,39 @@ def hent_vaer(lat, lon, tid):
 
 def beregn_risiko(temp, nb, vind):
     score = 0
-    if -1.5 <= temp <= 0.5: score += 5  # Nullføre er farligst
-    elif temp < -1.5: score += 3        # Vanlig vinterføre
-    if nb > 0.1: score += 3             # Nedbør/Snø
-    if vind > 12: score += 2            # Mye vind
+    if -1.5 <= temp <= 0.5: score += 5
+    elif temp < -1.5: score += 3
+    if nb > 0.1: score += 3
+    if vind > 12: score += 2
     score = min(score, 10)
     status = "🔴" if score >= 7 else "🟡" if score >= 4 else "🟢"
     return score, status
 
-# --- APP-GRENSESNITT ---
-st.title("🛡️ SikkerTur: Analyse for bil & elbil")
-
+# --- 5. SIDEBAR ---
 with st.sidebar:
-    st.header("Turdetaljer")
-    start = st.text_input("Reis fra:", "Sandnessjøen")
-    slutt = st.text_input("Reis til:", "Trondheim")
+    st.header("Planlegg tur")
+    fra = st.text_input("Fra:", "Sandnessjøen")
+    til = st.text_input("Til:", "Trondheim")
     dato = st.date_input("Dato:", datetime.now())
-    tid_valg = st.time_input("Tid:", datetime.now())
-    st.divider()
-    planlegg_knapp = st.button("Start Reiseanalyse", type="primary")
+    tid_v = st.time_input("Tid:", datetime.now())
+    start_knapp = st.button("Start Analyse", type="primary")
 
-# --- KJØRING OG VISNING ---
-if planlegg_knapp:
-    with st.spinner('Henter veidata og beregner risiko...'):
-        avreise_dt = datetime.combine(dato, tid_valg)
-        url = f"https://maps.googleapis.com/maps/api/directions/json?origin={start}&destination={slutt}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
+# --- 6. HOVEDLOGIKK ---
+if start_knapp:
+    with st.spinner('Bygger kartet...'):
+        avreise_dt = datetime.combine(dato, tid_v)
+        url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
         res = requests.get(url).json()
 
         if res['status'] == 'OK':
             leg = res['routes'][0]['legs'][0]
-            st.success(f"Analyse klar for turen mellom {start} og {slutt}")
-            st.metric("Total avstand", leg['distance']['text'])
+            st.session_state.reise_tekst = f"Rute: {leg['distance']['text']} | Tid: {leg['duration']['text']}"
             
-            # Opprett kartet
             m = folium.Map(location=[leg['start_location']['lat'], leg['start_location']['lng']], zoom_start=6)
             
-            tur_data = []
+            temp_data = []
             akk_m, akk_s, neste_km = 0, 0, 0
 
-            # Gå gjennom ruten
             for step in leg['steps']:
                 akk_m += step['distance']['value']
                 akk_s += step['duration']['value']
@@ -86,41 +84,32 @@ if planlegg_knapp:
                 if curr_km >= neste_km:
                     ankomst = avreise_dt + timedelta(seconds=akk_s)
                     lat, lon = step['end_location']['lat'], step['end_location']['lng']
-                    
                     temp, nb, vind = hent_vaer(lat, lon, ankomst)
                     score, status = beregn_risiko(temp, nb, vind)
                     sted = hent_stedsnavn(lat, lon)
-                    ladere = finn_ladestasjoner(lat, lon)
-                    kamera = f"https://www.vegvesen.no/trafikk/kamera?lat={lat}&lon={lon}"
-                    
-                    # Kart-markør
-                    farge = 'red' if score >= 7 else 'orange' if score >= 4 else 'green'
-                    lader_str = f"<br>⚡ <b>Lading:</b> {', '.join(ladere)}" if ladere else ""
-                    popup_html = f"<b>{sted}</b><br>Kl: {ankomst.strftime('%H:%M')}<br>Risiko: {score}/10 {status}<br>Temp: {temp}°C{lader_str}<br><a href='{kamera}' target='_blank'>Se Vegkamera</a>"
                     
                     folium.Marker(
                         [lat, lon],
-                        popup=folium.Popup(popup_html, max_width=250),
-                        icon=folium.Icon(color=farge, icon='info-sign')
+                        popup=f"{sted}: {score}/10 {status}",
+                        icon=folium.Icon(color='red' if score >= 7 else 'green')
                     ).add_to(m)
                     
-                    tur_data.append({
-                        "KM": round(curr_km),
-                        "Tid": ankomst.strftime('%H:%M'),
-                        "Sted": sted,
-                        "Temp": f"{temp}°C",
-                        "Risiko": f"{score}/10 {status}",
-                        "Lading": ", ".join(ladere) if ladere else "-"
-                    })
-                    neste_km += 70 # Sjekker hver 70. km
+                    temp_data.append({"KM": round(curr_km), "Tid": ankomst.strftime('%H:%M'), "Sted": sted, "Temp": f"{temp}°C", "Risiko": f"{score}/10 {status}"})
+                    neste_km += 80
 
-            # VISNING AV KART (Denne er nå stabil)
-            folium_static(m, width=700, height=500)
-            
-            # VISNING AV TABELL
-            st.subheader("Detaljert oversikt")
-            st.dataframe(tur_data, use_container_width=True)
+            st.session_state.tabell_data = temp_data
+            st.session_state.kart_html = m._repr_html_()
         else:
-            st.error("Kunne ikke beregne ruten. Sjekk stedsnavn eller API-nøkkel.")
+            st.error(f"Rute ikke funnet: {res.get('status')}")
+
+# --- 7. VISUALISERING ---
+if st.session_state.kart_html:
+    st.info(st.session_state.reise_tekst)
+    
+    import streamlit.components.v1 as components
+    components.html(st.session_state.kart_html, height=500)
+    
+    st.subheader("Etappeoversikt")
+    st.dataframe(st.session_state.tabell_data, use_container_width=True)
 else:
-    st.info("Fyll inn detaljene i menyen til venstre og trykk 'Start Reiseanalyse' for å se kart og vær.")
+    st.write("Fyll inn detaljer til venstre for å starte.")
