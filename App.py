@@ -7,124 +7,176 @@ from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURASJON ---
-st.set_page_config(page_title="SikkerTur Pro v21.6 - Lade-eksperten", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="SikkerTur Pro v21.6", page_icon="⚡", layout="wide")
 
-# --- 2. API-NØKKEL ---
+# --- 2. INITIALISERING OG API-NØKKEL ---
+# Dette forhindrer feilen du fikk: Vi sjekker om variablene finnes, hvis ikke lager vi dem.
+if "tabell_data" not in st.session_state:
+    st.session_state.tabell_data = None
+if "kart_html" not in st.session_state:
+    st.session_state.kart_html = None
+if "delay" not in st.session_state:
+    st.session_state.delay = 0
+if "orig_tid" not in st.session_state:
+    st.session_state.orig_tid = ""
+
 try:
     API_KEY = st.secrets["google_maps_api_key"]
 except:
     st.error("API-nøkkel mangler i Streamlit Secrets!")
     st.stop()
 
-# --- 3. AVANSERTE FUNKSJONER ---
+# --- 3. HJELPEFUNKSJONER ---
 
-def hent_alle_ladere_langs_rute(route_polyline):
-    # Bruker Google Places Text Search med rute-kontekst (forenklet simulering her)
-    # I en produksjons-app ville man brukt 'searchAlongRoute' endpoint
-    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    params = {
-        "query": "Tesla Supercharger",
-        "key": API_KEY,
-        "location": "61.5, 10.5", # Midt-Norge fokus
-        "radius": "500000"
-    }
+def hent_alle_ladere_langs_rute(lat, lon):
+    url = f"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat},{lon}&radius=40000&keyword=Tesla+Supercharger&key={API_KEY}"
     try:
-        res = requests.get(url, params=params).json()
-        if res['status'] == 'OK':
-            return res['results']
+        res = requests.get(url, timeout=5).json()
+        return res['results'] if res['status'] == 'OK' else []
+    except: return []
+
+def hent_vaer_detaljer(lat, lon, tid):
+    headers = {'User-Agent': 'SikkerTurApp/v21.6'}
+    url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        data = r.json()
+        target_time = tid.replace(tzinfo=None)
+        timeseries = data['properties']['timeseries']
+        best_match = min(timeseries, key=lambda x: abs((datetime.fromisoformat(x['time'].replace('Z', '')) - target_time).total_seconds()))
+        details = best_match['data']['instant']['details']
+        return {
+            "temp": details.get('air_temperature', 0),
+            "vind": details.get('wind_speed', 0),
+            "symbol": best_match['data']['next_1_hours']['summary']['symbol_code']
+        }
+    except: return {"temp": 0, "vind": 0, "symbol": "clearsky_day"}
+
+def hent_hoyde(lat, lon):
+    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={API_KEY}"
+    try:
+        res = requests.get(url, timeout=5).json()
+        return int(res['results'][0]['elevation']) if res['status'] == 'OK' else 0
+    except: return 0
+
+def hent_kommune(lat, lon):
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&key={API_KEY}&language=no"
+    try:
+        res = requests.get(url, timeout=5).json()
+        for result in res['results']:
+            for component in result['address_components']:
+                if "administrative_area_level_2" in component['types']:
+                    return component['long_name']
     except: pass
-    return []
+    return "Ukjent"
 
-def vurder_lader(lader_data, neste_stigning_km, km_merke):
-    rating = lader_data.get('rating', 0)
-    user_ratings = lader_data.get('user_ratings_total', 0)
-    navn = lader_data.get('name', 'Tesla Supercharger')
-    
-    anbefaling = ""
-    # Logikk: Er dette en god lader før en tøff etappe?
-    if km_merke < neste_stigning_km and (neste_stigning_km - km_merke) < 40:
-        anbefaling = "⭐ ANBEFALT: Siste lader før stigning."
-    elif rating >= 4.5 and user_ratings > 100:
-        anbefaling = "☕ Topp fasiliteter/rating."
-    
-    return anbefaling
+def analyser_forhold(vaer_data, ankomst_tid, hoyde):
+    time = ankomst_tid.hour
+    er_morkt = time >= 16 or time <= 9
+    sikt_tekst = "Klar sikt"
+    sikt_poeng = 0
+    if "fog" in vaer_data['symbol']: sikt_tekst = "Tåke"; sikt_poeng = 2
+    elif "snow" in vaer_data['symbol']: sikt_tekst = "Snøbyger"; sikt_poeng = 2
+    if er_morkt: sikt_tekst += " (Mørkt)"; sikt_poeng += 1
 
-# (Henter vær, høyde, kommune og risiko-funksjoner fra v21...)
-# [Inkluderer funksjonene: hent_vaer_detaljer, hent_hoyde, hent_kommune, analyser_forhold]
+    temp = vaer_data['temp']
+    score = 1
+    if -1.0 <= temp <= 1.0: 
+        kjoreforhold = "Svært glatt (nullføre)"; score += 5
+    elif temp < -1.0: 
+        kjoreforhold = "Vinterføre (is/snø)"; score += 3
+    else: 
+        kjoreforhold = "Våt veibane" if "rain" in vaer_data['symbol'] else "Tørr veibane"
 
-# --- 4. LOGIKK ---
-if st.sidebar.button("🚀 Kjør Totalanalyse", type="primary"):
-    with st.spinner('Analyserer rute, vær og lade-nettverk...'):
-        avreise_dt = datetime.combine(st.sidebar.date_input("Dato", key="d1"), st.sidebar.time_input("Tid", key="t1"))
-        
-        # 1. Hent Rute
-        route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&key={API_KEY}"
+    if vaer_data['vind'] > 12: score += 2
+    score += sikt_poeng
+    delay = 10 if score >= 8 else 5 if score >= 5 else 0
+    forbruk = "Høyt (Kulde/Stigning)" if (hoyde > 600 or temp < -5) else "Normalt"
+    return sikt_tekst, kjoreforhold, min(10, score), delay, forbruk
+
+# --- 4. SIDEBAR ---
+st.sidebar.header("📍 Avansert Reiseplanlegger")
+fra = st.sidebar.text_input("Fra:", value="Oslo")
+til = st.sidebar.text_input("Til:", value="Trondheim")
+valgt_dato = st.sidebar.date_input("Dato:", value=datetime.now())
+valgt_tid = st.sidebar.time_input("Tid:", value=datetime.now())
+start_knapp = st.sidebar.button("🚀 Kjør Totalanalyse", type="primary")
+
+# --- 5. LOGIKK ---
+if start_knapp:
+    with st.spinner('Analyserer rute, vær og ladestasjoner...'):
+        avreise_dt = datetime.combine(valgt_dato, valgt_tid)
+        route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
         route_res = requests.get(route_url).json()
 
         if route_res['status'] == 'OK':
             leg = route_res['routes'][0]['legs'][0]
-            polyline_str = route_res['routes'][0]['overview_polyline']['points']
-            alle_ladere = hent_alle_ladere_langs_rute(polyline_str)
+            vei_punkter = polyline.decode(route_res['routes'][0]['overview_polyline']['points'])
             
-            # Finn punkter med stor stigning (neste fjellovergang)
-            stigninger = [] # Lagrer KM-merker for høyde > 700m
-            
+            m = folium.Map(location=vei_punkter[0], zoom_start=6)
+            folium.PolyLine(vei_punkter, color="#2196F3", weight=5).add_to(m)
+
             temp_tabell = []
             akk_sek, akk_met, neste_sjekk_km, total_delay = 0, 0, 0, 0
+            ladere_langs_ruten = hent_alle_ladere_langs_rute(vei_punkter[len(vei_punkter)//2][0], vei_punkter[len(vei_punkter)//2][1])
 
             for step in leg['steps']:
                 dist_km = akk_met / 1000
                 if dist_km >= neste_sjekk_km:
-                    lat, lon = step['start_location']['lat'], step['start_location']['lng']
                     ankomst = avreise_dt + timedelta(seconds=akk_sek + (total_delay * 60))
-                    
-                    # Finn nærmeste lader fra vår liste "langs ruten"
-                    lader_her = next((l for l in alle_ladere if abs(l['geometry']['location']['lat'] - lat) < 0.05), None)
+                    lat, lon = step['start_location']['lat'], step['start_location']['lng']
                     
                     vaer = hent_vaer_detaljer(lat, lon, ankomst)
                     hoyde = hent_hoyde(lat, lon)
-                    if hoyde > 700: stigninger.append(neste_sjekk_km)
-                    
+                    kommune = hent_kommune(lat, lon)
                     sikt, kjore, score, delay, forbruk = analyser_forhold(vaer, ankomst, hoyde)
                     
-                    anbefalt_tekst = ""
-                    if lader_her:
-                        neste_stigning = min([s for s in stigninger if s > dist_km], default=9999)
-                        anbefalt_tekst = vurder_lader(lader_her, neste_stigning, dist_km)
-                        lader_navn = f"⚡ {lader_her['name']}"
-                    else:
-                        lader_navn = ""
+                    nermeste_lader = ""
+                    tips = ""
+                    for l in ladere_langs_ruten:
+                        l_lat, l_lon = l['geometry']['location']['lat'], l['geometry']['location']['lng']
+                        if abs(l_lat - lat) < 0.1 and abs(l_lon - lon) < 0.1:
+                            nermeste_lader = f"⚡ {l['name']}"
+                            if l.get('rating', 0) > 4.5: tips = "⭐ Topp fasiliteter"
+                            break
 
+                    total_delay += delay
                     temp_tabell.append({
                         "KM": int(neste_sjekk_km),
                         "Ankomst": ankomst.strftime("%H:%M"),
-                        "Sted": hent_kommune(lat, lon),
+                        "Sted": kommune,
                         "Høyde": hoyde,
                         "Føre": kjore,
                         "Forbruk": forbruk,
-                        "Tesla Lader": lader_navn,
-                        "Anbefaling": anbefalt_tekst,
+                        "Tesla Lader": nermeste_lader,
+                        "Tips": tips,
                         "Risiko": score
                     })
-                    neste_sjekk_km += 30 # Tettere sjekk for bedre lade-oppløsning
+                    neste_sjekk_km += 30
 
                 akk_met += step['distance']['value']
                 akk_sek += step['duration']['value']
 
             st.session_state.tabell_data = temp_tabell
-            # ... (kart-generering som før)
+            st.session_state.kart_html = m._repr_html_()
+            st.session_state.delay = total_delay
+            st.session_state.orig_tid = leg['duration']['text']
 
-# --- 5. VISNING ---
-if st.session_state.tabell_data:
+# --- 6. VISNING (Sjekker om tabell_data faktisk er satt) ---
+if st.session_state.get('tabell_data') is not None:
     df = pd.DataFrame(st.session_state.tabell_data)
     
-    st.subheader("📋 Reise- og Ladeplan")
-    
-    # Fremhev anbefalte ladestopp
-    anbefalinger = df[df['Anbefaling'] != ""]
-    if not anbefalinger.empty:
-        st.info("💡 **Smarte lade-tips for denne ruten:**")
-        for idx, row in anbefalinger.iterrows():
-            st.write(f"- Ved {row['KM']} km ({row['Sted']}): {row['Tesla Lader']} - *{row['Anbefaling']}*")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Anslått Forsinkelse", f"+{st.session_state.delay} min")
+    c2.metric("Total Tid", f"{st.session_state.orig_tid} (+{st.session_state.delay}m)")
+    c3.metric("Lademuligheter", f"{len(df[df['Tesla Lader'] != ''])} funnet")
 
-    st.dataframe(df.style.apply(lambda x: ['background-color: #f0f7ff' if x.Anbefaling != "" else '' for i in x], axis=1), use_container_width=True)
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        components.html(st.session_state.kart_html, height=450)
+    with col2:
+        st.write("**Høydeprofil (moh)**")
+        st.area_chart(df.set_index('KM')['Høyde'], height=350)
+        
+    st.subheader("📋 Vei- og Ladeplan")
+    st.dataframe(df, use_container_width=True)
