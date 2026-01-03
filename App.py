@@ -6,8 +6,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
-# --- 1. OPPSETT ---
-st.set_page_config(page_title="SikkerTur Pro v18", page_icon="🛡️", layout="wide")
+# --- 1. KONFIGURASJON ---
+st.set_page_config(page_title="SikkerTur Pro v20", page_icon="🛡️", layout="wide")
 
 # --- 2. API-NØKKEL ---
 try:
@@ -22,7 +22,7 @@ if "tabell_data" not in st.session_state:
 # --- 3. FUNKSJONER ---
 
 def hent_vaer_detaljer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/v18.0'}
+    headers = {'User-Agent': 'SikkerTurApp/v20.0'}
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
     try:
         r = requests.get(url, headers=headers, timeout=5)
@@ -37,10 +37,9 @@ def hent_vaer_detaljer(lat, lon, tid):
         return {
             "temp": details.get('air_temperature', 0),
             "vind": details.get('wind_speed', 0),
-            "skyer": details.get('cloud_area_fraction', 0), # Brukes ikke lenger i risiko
             "symbol": summary
         }
-    except: return {"temp": 0, "vind": 0, "skyer": 0, "symbol": "clearsky_day"}
+    except: return {"temp": 0, "vind": 0, "symbol": "clearsky_day"}
 
 def hent_hoyde(lat, lon):
     url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={API_KEY}"
@@ -63,7 +62,6 @@ def hent_kommune(lat, lon):
     return "Ukjent"
 
 def analyser_forhold(vaer_data, ankomst_tid):
-    # Sikt-analyse
     sikt_tekst = "Klar sikt"
     sikt_poeng = 0
     time = ankomst_tid.hour
@@ -79,7 +77,6 @@ def analyser_forhold(vaer_data, ankomst_tid):
         sikt_tekst += " + Mørke"
         sikt_poeng += 1
 
-    # Kjøreforhold-analyse (Tekstlig)
     temp = vaer_data['temp']
     if -1.0 <= temp <= 1.0:
         kjoreforhold = "Svært glatt (nullføre)"
@@ -90,10 +87,8 @@ def analyser_forhold(vaer_data, ankomst_tid):
     else:
         kjoreforhold = "Tørr veibane"
 
-    # Risikoscore (Uten skydekke)
     score = 1
     grunner = []
-    
     if -1.5 <= temp <= 0.5: 
         score += 5; grunner.append("Isfare")
     elif temp < -1.5: 
@@ -104,13 +99,12 @@ def analyser_forhold(vaer_data, ankomst_tid):
     
     score += sikt_poeng
     if sikt_poeng >= 2: grunner.append("Dårlig sikt")
-
     if not grunner: grunner.append("Optimale forhold")
     
     return sikt_tekst, kjoreforhold, min(10, score), ", ".join(grunner)
 
 # --- 4. SIDEBAR ---
-st.sidebar.header("📍 Reiseinnstillinger")
+st.sidebar.header("📍 Reiseplan")
 fra = st.sidebar.text_input("Fra:", value="Oslo")
 til = st.sidebar.text_input("Til:", value="Trondheim")
 dato = st.sidebar.date_input("Dato:", value=datetime.now())
@@ -119,7 +113,7 @@ start_knapp = st.sidebar.button("🚀 Kjør Veianalyse", type="primary")
 
 # --- 5. LOGIKK ---
 if start_knapp:
-    with st.spinner('Analyserer rute og kjøreforhold...'):
+    with st.spinner('Henter data...'):
         avreise_dt = datetime.combine(dato, tid_v)
         route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
         route_res = requests.get(route_url).json()
@@ -145,14 +139,11 @@ if start_knapp:
                     kommune = hent_kommune(lat, lon)
                     sikt, kjoreforhold, score, arsak = analyser_forhold(vaer, ankomst)
                     
-                    farge = "red" if score >= 7 else "orange" if score >= 4 else "green"
-                    folium.Marker([lat, lon], popup=f"{kommune}: {score}/10").add_to(m)
-                    
                     temp_tabell.append({
                         "KM": int(neste_sjekk_km),
                         "Tid": ankomst.strftime("%H:%M"),
                         "Sted": kommune,
-                        "Høyde": f"{hoyde}m",
+                        "Høyde": hoyde,
                         "Vær": f"{vaer['temp']}°C / {sikt}",
                         "Kjøreforhold": kjoreforhold,
                         "Risiko": score,
@@ -166,18 +157,20 @@ if start_knapp:
             st.session_state.tabell_data = temp_tabell
             st.session_state.kart_html = m._repr_html_()
 
-# --- 6. VISNING ---
+# --- 6. VISNING (Responsivt Design) ---
 if st.session_state.tabell_data:
     df = pd.DataFrame(st.session_state.tabell_data)
     
     col1, col2 = st.columns([2, 1])
+    
     with col1:
-        components.html(st.session_state.kart_html, height=500)
+        st.subheader("🗺️ Kart")
+        components.html(st.session_state.kart_html, height=450)
+    
     with col2:
-        st.write("📈 **Høydeprofil**")
-        st.area_chart(df.set_index('KM')['Høyde'].str.replace('m','').astype(int))
-        st.write("⚠️ **Risikoprofil (uten skydekke)**")
-        st.line_chart(df.set_index('KM')['Risiko'])
+        st.subheader("📈 Høydeprofil")
+        # Grafen får mer plass nå som risiko-grafen er borte
+        st.area_chart(df.set_index('KM')['Høyde'], height=380)
         
     st.subheader("📋 Detaljert Veirapport")
     st.dataframe(df, use_container_width=True)
