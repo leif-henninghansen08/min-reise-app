@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURASJON ---
-st.set_page_config(page_title="SikkerTur Pro v21", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="SikkerTur Pro v21.1", page_icon="🚗", layout="wide")
 
 # --- 2. INITIALISERING OG API-NØKKEL ---
 if "tabell_data" not in st.session_state:
@@ -26,9 +26,8 @@ except:
     st.stop()
 
 # --- 3. HJELPEFUNKSJONER ---
-
 def hent_vaer_detaljer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/v21.0'}
+    headers = {'User-Agent': 'SikkerTurApp/v21.1'}
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
     try:
         r = requests.get(url, headers=headers, timeout=5)
@@ -67,13 +66,9 @@ def analyser_forhold(vaer_data, ankomst_tid, hoyde):
     er_morkt = time >= 16 or time <= 9
     sikt_tekst = "Klar sikt"
     sikt_poeng = 0
-    
     if "fog" in vaer_data['symbol']: sikt_tekst = "Tåke"; sikt_poeng = 2
     elif "snow" in vaer_data['symbol']: sikt_tekst = "Snøbyger"; sikt_poeng = 2
-    
-    if er_morkt:
-        sikt_tekst += " (Mørkt)"
-        sikt_poeng += 1
+    if er_morkt: sikt_tekst += " (Mørkt)"; sikt_poeng += 1
 
     temp = vaer_data['temp']
     score = 1
@@ -86,21 +81,30 @@ def analyser_forhold(vaer_data, ankomst_tid, hoyde):
 
     if vaer_data['vind'] > 12: score += 2
     score += sikt_poeng
+    delay = 10 if score >= 8 else 5 if score >= 5 else 0
+    forbruk = "Høyt (Kulde/Stigning)" if (hoyde > 600 or temp < -5) else "Normalt"
+    return sikt_tekst, kjoreforhold, min(10, score), delay, forbruk
 
-    forsinkelse_min = 10 if score >= 8 else 5 if score >= 5 else 0
-    forbruk_faktor = "Høyt (Kulde/Stigning)" if (hoyde > 600 or temp < -5) else "Normalt"
+# --- 4. HOVEDLAYOUT OG LENKER ---
+st.title("🚗 SikkerTur Pro")
+st.markdown("### Eksterne sanntidstjenester")
+col_link1, col_link2 = st.columns(2)
+with col_link1:
+    st.link_button("🏔️ Sjekk Fjelloverganger (Vegvesen)", "https://www.vegvesen.no/trafikkinformasjon/reiseinformasjon/fjelloverganger/", use_container_width=True)
+with col_link2:
+    st.link_button("📸 Webkamera langs veien", "https://www.vegvesen.no/trafikk", use_container_width=True)
 
-    return sikt_tekst, kjoreforhold, min(10, score), forsinkelse_min, forbruk_faktor
+st.divider()
 
-# --- 4. SIDEBAR ---
-st.sidebar.header("📍 Reiseplanlegger Pro")
+# --- 5. SIDEBAR ---
+st.sidebar.header("📍 Planlegg rute")
 fra = st.sidebar.text_input("Fra:", value="Oslo")
 til = st.sidebar.text_input("Til:", value="Trondheim")
 dato = st.sidebar.date_input("Dato:", value=datetime.now())
 tid_v = st.sidebar.time_input("Tid:", value=datetime.now())
 start_knapp = st.sidebar.button("🚀 Kjør Totalanalyse", type="primary")
 
-# --- 5. LOGIKK ---
+# --- 6. LOGIKK ---
 if start_knapp:
     with st.spinner('Kjører avansert simulering...'):
         avreise_dt = datetime.combine(dato, tid_v)
@@ -150,14 +154,14 @@ if start_knapp:
             st.session_state.delay = total_delay
             st.session_state.orig_tid = leg['duration']['text']
 
-# --- 6. VISNING ---
+# --- 7. VISNING ---
 if st.session_state.get('tabell_data') is not None:
     df = pd.DataFrame(st.session_state.tabell_data)
     
     c1, c2, c3 = st.columns(3)
     c1.metric("Beregnet Forsinkelse", f"+{st.session_state.delay} min", "Pga. vær/føre")
     c2.metric("Total Reisetid", f"{st.session_state.orig_tid} (+{st.session_state.delay}m)")
-    c3.metric("Fjelloverganger", "Sjekk VTS", "Statens Vegvesen")
+    c3.metric("Status", "Analyse fullført")
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -169,4 +173,3 @@ if st.session_state.get('tabell_data') is not None:
         
     st.subheader("📋 Detaljert Veiplan")
     st.dataframe(df, use_container_width=True)
-    st.download_button(label="📥 Last ned reiseplan (CSV)", data=df.to_csv().encode('utf-8'), file_name='reiseplan.csv')
