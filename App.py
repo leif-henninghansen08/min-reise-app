@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
 # --- 1. OPPSETT ---
-st.set_page_config(page_title="SikkerTur Pro v6", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="SikkerTur Pro v7", page_icon="🚗", layout="wide")
 
 # --- 2. SIKKER HENTING AV API-NØKKEL ---
 try:
@@ -32,7 +32,7 @@ def hent_stedsnavn(lat, lon):
     return f"{round(lat,2)}, {round(lon,2)}"
 
 def hent_vaer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/v6.0'}
+    headers = {'User-Agent': 'SikkerTurApp/v7.0'}
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
     try:
         r = requests.get(url, headers=headers)
@@ -63,59 +63,70 @@ with st.sidebar:
 
 # --- 6. HOVEDLOGIKK ---
 if start_knapp:
-    with st.spinner('Beregner rute og henter vær...'):
+    with st.spinner('Beregner rute med punkter hver 100 km...'):
         avreise_dt = datetime.combine(dato, tid_v)
         route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
         route_res = requests.get(route_url).json()
 
         if route_res['status'] == 'OK':
             leg = route_res['routes'][0]['legs'][0]
-            
-            # Lag kartet
             m = folium.Map(location=[leg['start_location']['lat'], leg['start_location']['lng']], zoom_start=6)
             
-            # --- NYTT: TEGNE RUTEN ---
-            # Vi henter alle punkter fra ruten for å tegne den blå linjen
-            rute_punkter = []
-            for step in leg['steps']:
-                rute_punkter.append([step['start_location']['lat'], step['start_location']['lng']])
+            # Tegne den blå ruten
+            rute_punkter = [[step['start_location']['lat'], step['start_location']['lng']] for step in leg['steps']]
             rute_punkter.append([leg['end_location']['lat'], leg['end_location']['lng']])
-            
             folium.PolyLine(rute_punkter, color="blue", weight=5, opacity=0.8).add_to(m)
-            # Zoomer kartet automatisk slik at hele linjen passer inn
             m.fit_bounds(rute_punkter)
-            # --------------------------
 
             temp_tabell = []
-            akk_s = 0
-            steps = leg['steps']
-            interval = max(1, len(steps) // 8)
-            
-            for i in range(0, len(steps), interval):
-                step = steps[i]
-                akk_s += step['duration']['value']
-                ankomst = avreise_dt + timedelta(seconds=akk_s)
-                lat, lon = step['end_location']['lat'], step['end_location']['lng']
+            akk_sekunder = 0
+            akk_meter = 0
+            neste_sjekk_km = 0  # Starter på 0 km, så 100, 200...
+
+            for step in leg['steps']:
+                distanse_meter = step['distance']['value']
+                tid_sekunder = step['duration']['value']
                 
-                temp, vind = hent_vaer(lat, lon, ankomst)
-                stedsnavn = hent_stedsnavn(lat, lon)
-                status_tekst, farge = tolke_forhold(temp)
-                
-                vegvesen_url = f"https://www.vegvesen.no/trafikkinformasjon/reiseinformasjon/trafikkmeldinger?lat={lat}&lon={lon}&zoom=11"
-                
-                popup_txt = f"<b>{stedsnavn}</b><br>Passering: {ankomst.strftime('%H:%M')}<br>Vær: {temp}°C<br><a href='{vegvesen_url}' target='_blank'>Kamera</a>"
-                folium.Marker([lat, lon], popup=folium.Popup(popup_txt, max_width=200), icon=folium.Icon(color=farge)).add_to(m)
-                
-                temp_tabell.append({
-                    "Forventet Passering": ankomst.strftime('%H:%M'),
-                    "Sted": stedsnavn,
-                    "Temp": f"{temp}°C" if temp is not None else "N/A",
-                    "Forhold": status_tekst
-                })
+                # Sjekk om dette steget i ruten passerer en 100 km grense
+                if (akk_meter / 1000) >= neste_sjekk_km:
+                    ankomst = avreise_dt + timedelta(seconds=akk_sekunder)
+                    lat, lon = step['start_location']['lat'], step['start_location']['lng']
+                    
+                    temp, vind = hent_vaer(lat, lon, ankomst)
+                    stedsnavn = hent_stedsnavn(lat, lon)
+                    status_tekst, farge = tolke_forhold(temp)
+                    
+                    vegvesen_url = f"https://www.vegvesen.no/trafikkinformasjon/reiseinformasjon/trafikkmeldinger?lat={lat}&lon={lon}&zoom=11"
+                    
+                    popup_txt = f"<b>{stedsnavn}</b><br>{round(akk_meter/1000)} km kjørt<br>Passering: {ankomst.strftime('%H:%M')}<br>Vær: {temp}°C<br><a href='{vegvesen_url}' target='_blank'>Kamera</a>"
+                    folium.Marker([lat, lon], popup=folium.Popup(popup_txt, max_width=200), icon=folium.Icon(color=farge)).add_to(m)
+                    
+                    temp_tabell.append({
+                        "Distanse": f"{round(akk_meter/1000)} km",
+                        "Forventet Passering": ankomst.strftime('%H:%M'),
+                        "Sted": stedsnavn,
+                        "Temp": f"{temp}°C" if temp is not None else "N/A",
+                        "Forhold": status_tekst
+                    })
+                    
+                    neste_sjekk_km += 100 # Sett neste sjekkpunkt til 100 km lenger frem
+
+                akk_meter += distanse_meter
+                akk_sekunder += tid_sekunder
+
+            # Legg til sluttpunktet i tabellen uansett
+            ankomst_slutt = avreise_dt + timedelta(seconds=leg['duration']['value'])
+            temp_tabell.append({
+                "Distanse": f"{round(leg['distance']['value']/1000)} km (Slutt)",
+                "Forventet Passering": ankomst_slutt.strftime('%H:%M'),
+                "Sted": til,
+                "Temp": "-",
+                "Forhold": "Ankomst"
+            })
 
             st.session_state.tabell_data = temp_tabell
             st.session_state.kart_html = m._repr_html_()
-            st.session_state.reise_info = f"**Distanse:** {leg['distance']['text']} | **Reisetid:** {leg['duration']['text']}"
+            st.session_state.reise_info = f"**Total distanse:** {leg['distance']['text']} | **Total reisetid:** {leg['duration']['text']}"
 
 # --- 7. VISNING ---
 if st.session_state.kart_html:
