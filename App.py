@@ -8,7 +8,7 @@ import streamlit.components.v1 as components
 import math
 
 # --- 1. KONFIGURASJON ---
-st.set_page_config(page_title="SikkerTur Pro v22.1", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="SikkerTur Pro v22.4", page_icon="🚗", layout="wide")
 
 # --- 2. INITIALISERING ---
 if "tabell_data" not in st.session_state:
@@ -19,7 +19,7 @@ if "kart_html" not in st.session_state:
 try:
     API_KEY = st.secrets["google_maps_api_key"]
 except:
-    st.error("API-nøkkel mangler i Streamlit Secrets!")
+    st.error("API-nøkkel mangler i Streamlit Secrets! Legg den til i .streamlit/secrets.toml")
     st.stop()
 
 # --- 3. HJELPEFUNKSJONER ---
@@ -34,12 +34,11 @@ def haversine_distance(p1, p2):
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
 def hent_lysforhold(lat, lon, dato):
-    """Sjekker om det er lyst eller mørkt på gitt sted/tid"""
+    """Sjekker dagslys vs mørke"""
     url = f"https://api.sunrise-sunset.org/json?lat={lat}&lng={lon}&date={dato.strftime('%Y-%m-%d')}&formatted=0"
     try:
         res = requests.get(url, timeout=5).json()
         if res['status'] == 'OK':
-            # Forenklet konvertering til norsk tid (UTC+1)
             opp = datetime.fromisoformat(res['results']['sunrise'].replace('Z', '+00:00')) + timedelta(hours=1)
             ned = datetime.fromisoformat(res['results']['sunset'].replace('Z', '+00:00')) + timedelta(hours=1)
             return opp.time(), ned.time()
@@ -52,10 +51,11 @@ def oversett_vaertype(symbol_kode):
         'cloudy': 'Overskyet', 'rain': 'Regn', 'heavyrain': 'Kraftig regn',
         'snow': 'Snø', 'heavysnow': 'Kraftig snø', 'sleet': 'Sludd', 'fog': 'Tåke'
     }
-    return koder.get(symbol_kode.split('_')[0], symbol_kode.capitalize())
+    ren_kode = symbol_kode.split('_')[0]
+    return koder.get(ren_kode, ren_kode.capitalize())
 
 def hent_vaer_detaljer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/v22.1'}
+    headers = {'User-Agent': 'SikkerTurApp/v22.4'}
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
     try:
         r = requests.get(url, headers=headers, timeout=5)
@@ -91,9 +91,7 @@ def hent_hoyde(lat, lon):
     except: return 0
 
 def fargelegg_rader(row):
-    """Styler tabellen visuelt"""
     styles = [''] * len(row)
-    # Værtype (indeks 3) og Lys (indeks 4)
     if 'Snø' in str(row['Værtype']) or 'Sludd' in str(row['Værtype']):
         styles[3] = 'background-color: #003366; color: white; font-weight: bold'
     if row['Lys'] == '🌙 Mørkt':
@@ -101,16 +99,31 @@ def fargelegg_rader(row):
     return styles
 
 # --- 4. SIDEBAR ---
-st.sidebar.header("📍 Reiseplanlegger Pro v22.1")
+st.sidebar.header("📍 Reiseplanlegger Pro")
 fra = st.sidebar.text_input("Fra:", value="Oslo")
 til = st.sidebar.text_input("Til:", value="Trondheim")
+dato_avreise = st.sidebar.date_input("Dato for avreise:", value=datetime.now())
+tid_avreise = st.sidebar.time_input("Tidspunkt for avreise:", value=datetime.now())
 start_knapp = st.sidebar.button("🚀 Kjør Totalanalyse", type="primary")
 
-# --- 5. LOGIKK ---
+# --- 5. HOVEDSIDE / VEILEDNING ---
+st.title("🚗 SikkerTur Pro")
+
+if st.session_state.tabell_data is None:
+    st.info("""
+    ### 👋 Velkommen! Slik bruker du programmet:
+    1. **Tast inn start og destinasjon** i menyen til venstre.
+    2. **Velg tidspunkt** for avreise for å få riktig trafikk- og værbilde.
+    3. **Trykk 'Kjør Totalanalyse'** for å se sikkerhetsrisiko hver 50. km.
+    """)
+
+# --- 6. LOGIKK ---
 if start_knapp:
-    with st.spinner('Analyserer rute og risiko...'):
-        avreise_dt = datetime.now()
-        route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&key={API_KEY}&language=no"
+    with st.spinner('Beregner nøyaktig rute og risiko...'):
+        avreise_dt = datetime.combine(dato_avreise, tid_avreise)
+        avreise_ts = int(avreise_dt.timestamp())
+        
+        route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={avreise_ts}&key={API_KEY}&language=no"
         route_res = requests.get(route_url).json()
 
         if route_res['status'] == 'OK':
@@ -122,6 +135,9 @@ if start_knapp:
             
             temp_tabell = []
             akk_meter, neste_sjekk_meter = 0, 0
+            
+            # Bruker trafikkjustert tid hvis tilgjengelig
+            total_sekunder = leg.get('duration_in_traffic', leg['duration'])['value']
 
             for i in range(len(alle_punkter) - 1):
                 p1, p2 = alle_punkter[i], alle_punkter[i+1]
@@ -130,7 +146,7 @@ if start_knapp:
                 if akk_meter >= neste_sjekk_meter:
                     km_merke = int(neste_sjekk_meter / 1000)
                     framdrift = akk_meter / leg['distance']['value'] if leg['distance']['value'] > 0 else 0
-                    passeringstid = avreise_dt + timedelta(seconds=leg['duration']['value'] * framdrift)
+                    passeringstid = avreise_dt + timedelta(seconds=total_sekunder * framdrift)
                     
                     lat, lon = p1[0], p1[1]
                     vaer = hent_vaer_detaljer(lat, lon, passeringstid)
@@ -141,14 +157,15 @@ if start_knapp:
                     er_lyst = opp <= passeringstid.time() <= ned if opp else True
                     lys_txt = "☀️ Lyst" if er_lyst else "🌙 Mørkt"
                     
-                    # Risiko-beregning og årsak
+                    # Risiko-beregning
                     score = 1
                     arsaker = []
                     if not er_lyst: score += 1; arsaker.append("Mørke")
                     if "Snø" in vaer['vaertype'] or "Sludd" in vaer['vaertype']: score += 4; arsaker.append("Vinterføre")
-                    if vaer['vind'] > 12: score += 2; arsaker.append("Vind")
+                    if vaer['vind'] > 12: score += 1; arsaker.append("Vind")
                     if hoyde > 800: score += 1; arsaker.append("Fjell")
                     if -1.2 <= vaer['temp'] <= 1.2: score += 2; arsaker.append("Nullføre")
+                    
                     forklaring = ", ".join(arsaker) if arsaker else "Gode forhold"
 
                     temp_tabell.append({
@@ -158,26 +175,26 @@ if start_knapp:
                         "Høyde": hoyde, "Risiko": score, "Årsak til risiko": forklaring
                     })
                     
-                    # Kart-markør med logisk farge
-                    farge = 'red' if score >= 6 else 'black' if not er_lyst else 'blue'
-                    folium.Marker(location=[lat, lon], popup=f"{km_merke}km: {forklaring}", icon=folium.Icon(color=farge)).add_to(m)
+                    marker_farge = 'red' if score >= 6 else 'black' if not er_lyst else 'blue'
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup=f"<b>{km_merke} km: {kommune}</b><br>Risiko: {forklaring}",
+                        icon=folium.Icon(color=marker_farge)
+                    ).add_to(m)
                     
                     neste_sjekk_meter += 50000 
+                
                 akk_meter += dist_steg
 
             st.session_state.tabell_data = temp_tabell
             st.session_state.kart_html = m._repr_html_()
 
-# --- 6. VISNING ---
+# --- 7. VISNING ---
 if st.session_state.tabell_data:
-    st.subheader("🗺️ Reisekart (Rød = Høy risiko, Svart = Mørke)")
+    st.subheader("🗺️ Analyse av reiserute")
     components.html(st.session_state.kart_html, height=500)
     
-    st.subheader("📋 Detaljert Veiplan og Risikoanalyse")
     df = pd.DataFrame(st.session_state.tabell_data)
-    
-    # Påfør styling og fargegradient
-    styler = df.style.apply(fargelegg_rader, axis=1)\
-                     .background_gradient(subset=['Risiko'], cmap='YlOrRd')
-    
+    styler = df.style.apply(fargelegg_rader, axis=1).background_gradient(subset=['Risiko'], cmap='YlOrRd')
+    st.subheader("📋 Detaljert Veiplan og Risikoanalyse")
     st.dataframe(styler, use_container_width=True)
