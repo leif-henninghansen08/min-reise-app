@@ -7,9 +7,9 @@ from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
 # --- 1. KONFIGURASJON ---
-st.set_page_config(page_title="SikkerTur Pro v21.7", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="SikkerTur Pro v21.8", page_icon="🚗", layout="wide")
 
-# --- 2. INITIALISERING OG API-NØKKEL ---
+# --- 2. INITIALISERING ---
 if "tabell_data" not in st.session_state:
     st.session_state.tabell_data = None
 if "kart_html" not in st.session_state:
@@ -24,7 +24,6 @@ except:
 # --- 3. HJELPEFUNKSJONER ---
 
 def hent_lysforhold(lat, lon, dato):
-    """Henter dagslysdata fra Sunrise-Sunset API"""
     url = f"https://api.sunrise-sunset.org/json?lat={lat}&lng={lon}&date={dato.strftime('%Y-%m-%d')}&formatted=0"
     try:
         res = requests.get(url, timeout=5).json()
@@ -48,7 +47,7 @@ def oversett_vaertype(symbol_kode):
     return koder.get(ren_kode, ren_kode.capitalize())
 
 def hent_vaer_detaljer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/v21.7'}
+    headers = {'User-Agent': 'SikkerTurApp/v21.8'}
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
     try:
         r = requests.get(url, headers=headers, timeout=5)
@@ -69,13 +68,6 @@ def hent_vaer_detaljer(lat, lon, tid):
         }
     except: return {"temp": 0, "vind": 0, "kast": 0, "nedbor": 0, "vaertype": "Ukjent"}
 
-def hent_hoyde(lat, lon):
-    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={API_KEY}"
-    try:
-        res = requests.get(url, timeout=5).json()
-        return int(res['results'][0]['elevation']) if res['status'] == 'OK' else 0
-    except: return 0
-
 def hent_kommune(lat, lon):
     url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&key={API_KEY}&language=no"
     try:
@@ -86,14 +78,20 @@ def hent_kommune(lat, lon):
     except: pass
     return "Ukjent"
 
+def hent_hoyde(lat, lon):
+    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={API_KEY}"
+    try:
+        res = requests.get(url, timeout=5).json()
+        return int(res['results'][0]['elevation']) if res['status'] == 'OK' else 0
+    except: return 0
+
 def fargelegg_rader(row):
-    """Styler celler for snø og mørke"""
     styles = [''] * len(row)
-    # Indeks 2 er Værtype, Indeks 3 er Lys
+    # Værtype er indeks 3, Lys er indeks 4
     if 'Snø' in str(row['Værtype']) or 'Sludd' in str(row['Værtype']):
-        styles[2] = 'background-color: #003366; color: white; font-weight: bold'
+        styles[3] = 'background-color: #003366; color: white; font-weight: bold'
     if row['Lys'] == '🌙 Mørkt':
-        styles[3] = 'background-color: #2c3e50; color: #ecf0f1'
+        styles[4] = 'background-color: #2c3e50; color: #ecf0f1'
     return styles
 
 # --- 4. SIDEBAR ---
@@ -106,7 +104,7 @@ start_knapp = st.sidebar.button("🚀 Kjør Totalanalyse", type="primary")
 
 # --- 5. LOGIKK ---
 if start_knapp:
-    with st.spinner('Kjører avansert sikkerhetssimulering...'):
+    with st.spinner('Henter stedsnavn, nedbør og lysforhold...'):
         avreise_dt = datetime.combine(dato_inn, tid_inn)
         route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
         route_res = requests.get(route_url).json()
@@ -114,7 +112,6 @@ if start_knapp:
         if route_res['status'] == 'OK':
             leg = route_res['routes'][0]['legs'][0]
             vei_punkter = polyline.decode(route_res['routes'][0]['overview_polyline']['points'])
-            
             m = folium.Map(location=vei_punkter[0], zoom_start=6)
             folium.PolyLine(vei_punkter, color="#2196F3", weight=5).add_to(m)
 
@@ -128,37 +125,37 @@ if start_knapp:
                     lat, lon = step['start_location']['lat'], step['start_location']['lng']
                     
                     vaer = hent_vaer_detaljer(lat, lon, passeringstid)
+                    kommune = hent_kommune(lat, lon)
                     hoyde = hent_hoyde(lat, lon)
                     opp, ned = hent_lysforhold(lat, lon, passeringstid)
                     
-                    # Lys-logikk
                     er_lyst = opp <= passeringstid.time() <= ned if opp else True
                     lys_tekst = "☀️ Lyst" if er_lyst else "🌙 Mørkt"
                     
-                    # Risiko-logikk
                     score = 1
                     if not er_lyst: score += 1
                     if "Snø" in vaer['vaertype'] or "Sludd" in vaer['vaertype']: score += 4
-                    if vaer['temp'] <= 1 and vaer['temp'] >= -1: score += 3 # Nullføre
+                    if -1.0 <= vaer['temp'] <= 1.2: score += 3
 
-                    # Kart-markør
                     folium.Marker(
                         location=[lat, lon],
-                        popup=f"<b>{neste_sjekk_km} km</b><br>{vaer['vaertype']}<br>{lys_tekst}",
+                        popup=f"<b>{neste_sjekk_km} km: {kommune}</b><br>{vaer['vaertype']}<br>{vaer['nedbor']} mm",
                         icon=folium.Icon(color='black' if not er_lyst else 'blue', icon='info-sign')
                     ).add_to(m)
 
-                    total_delay += (5 if score >= 6 else 0)
                     temp_tabell.append({
                         "KM": int(neste_sjekk_km),
+                        "Sted": kommune,
                         "Passering": passeringstid.strftime("%H:%M"),
                         "Værtype": vaer['vaertype'],
                         "Lys": lys_tekst,
+                        "Nedbør (mm)": vaer['nedbor'],
                         "Temp": f"{vaer['temp']}°C",
                         "Vind (Kast)": f"{vaer['vind']} ({vaer['kast']})",
                         "Høyde": hoyde,
                         "Risiko": score
                     })
+                    total_delay += (5 if score >= 7 else 0)
                     neste_sjekk_km += 50
                 akk_met += step['distance']['value']
                 akk_sek += step['duration']['value']
@@ -168,17 +165,13 @@ if start_knapp:
 
 # --- 6. VISNING ---
 if st.session_state.get('tabell_data') is not None:
-    st.subheader("🗺️ Reisekart (Sorte markører = mørkekjøring)")
+    st.subheader("🗺️ Reisekart (Sorte markører = mørke)")
     components.html(st.session_state.kart_html, height=500)
     
     st.subheader("📋 Detaljert Veiplan")
     df = pd.DataFrame(st.session_state.tabell_data)
-    
-    # Påfør all styling
-    styler = df.style.apply(fargelegg_rader, axis=1)\
-                     .background_gradient(subset=['Risiko'], cmap='YlOrRd')
-    
+    styler = df.style.apply(fargelegg_rader, axis=1).background_gradient(subset=['Risiko'], cmap='YlOrRd')
     st.dataframe(styler, use_container_width=True)
     
-    st.subheader("📈 Høydeprofil")
+    st.subheader("📈 Høydeprofil (moh)")
     st.area_chart(df.set_index('KM')['Høyde'])
