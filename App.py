@@ -5,9 +5,10 @@ import polyline
 import pandas as pd
 from datetime import datetime, timedelta
 import streamlit.components.v1 as components
+import math
 
 # --- 1. KONFIGURASJON ---
-st.set_page_config(page_title="SikkerTur Pro v21.8", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="SikkerTur Pro v21.9", page_icon="🚗", layout="wide")
 
 # --- 2. INITIALISERING ---
 if "tabell_data" not in st.session_state:
@@ -23,13 +24,24 @@ except:
 
 # --- 3. HJELPEFUNKSJONER ---
 
+def haversine_distance(p1, p2):
+    """Beregner avstand i meter mellom to koordinater"""
+    R = 6371000 
+    lat1, lon1 = math.radians(p1[0]), math.radians(p1[1])
+    lat2, lon2 = math.radians(p2[0]), math.radians(p2[1])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
 def hent_lysforhold(lat, lon, dato):
     url = f"https://api.sunrise-sunset.org/json?lat={lat}&lng={lon}&date={dato.strftime('%Y-%m-%d')}&formatted=0"
     try:
         res = requests.get(url, timeout=5).json()
         if res['status'] == 'OK':
-            opp = datetime.fromisoformat(res['results']['sunrise']) + timedelta(hours=1)
-            ned = datetime.fromisoformat(res['results']['sunset']) + timedelta(hours=1)
+            opp = datetime.fromisoformat(res['results']['sunrise'].replace('Z', '+00:00')) + timedelta(hours=1)
+            ned = datetime.fromisoformat(res['results']['sunset'].replace('Z', '+00:00')) + timedelta(hours=1)
             return opp.time(), ned.time()
     except: pass
     return None, None
@@ -41,13 +53,13 @@ def oversett_vaertype(symbol_kode):
         'lightrain': 'Lett regn', 'rainshowers': 'Regnbyger', 'snow': 'Snø',
         'heavysnow': 'Kraftig snø', 'lightsnow': 'Lett snø', 'snowshowers': 'Snøbyger',
         'sleet': 'Sludd', 'heavysleet': 'Kraftig sludd', 'lightsleet': 'Lett sludd',
-        'fog': 'Tåke', 'thunder': 'Tordenvær'
+        'fog': 'Tåke'
     }
     ren_kode = symbol_kode.split('_')[0]
     return koder.get(ren_kode, ren_kode.capitalize())
 
 def hent_vaer_detaljer(lat, lon, tid):
-    headers = {'User-Agent': 'SikkerTurApp/v21.8'}
+    headers = {'User-Agent': 'SikkerTurApp/v21.9'}
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={round(lat, 4)}&lon={round(lon, 4)}"
     try:
         r = requests.get(url, headers=headers, timeout=5)
@@ -87,7 +99,6 @@ def hent_hoyde(lat, lon):
 
 def fargelegg_rader(row):
     styles = [''] * len(row)
-    # Værtype er indeks 3, Lys er indeks 4
     if 'Snø' in str(row['Værtype']) or 'Sludd' in str(row['Værtype']):
         styles[3] = 'background-color: #003366; color: white; font-weight: bold'
     if row['Lys'] == '🌙 Mørkt':
@@ -95,7 +106,7 @@ def fargelegg_rader(row):
     return styles
 
 # --- 4. SIDEBAR ---
-st.sidebar.header("📍 Reiseplanlegger Pro")
+st.sidebar.header("📍 Reiseplanlegger Pro v21.9")
 fra = st.sidebar.text_input("Fra:", value="Oslo")
 til = st.sidebar.text_input("Til:", value="Trondheim")
 dato_inn = st.sidebar.date_input("Dato:", value=datetime.now())
@@ -104,26 +115,35 @@ start_knapp = st.sidebar.button("🚀 Kjør Totalanalyse", type="primary")
 
 # --- 5. LOGIKK ---
 if start_knapp:
-    with st.spinner('Henter stedsnavn, nedbør og lysforhold...'):
+    with st.spinner('Beregner nøyaktige sjekkpunkter hver 50. km...'):
         avreise_dt = datetime.combine(dato_inn, tid_inn)
         route_url = f"https://maps.googleapis.com/maps/api/directions/json?origin={fra}&destination={til}&departure_time={int(avreise_dt.timestamp())}&key={API_KEY}&language=no"
         route_res = requests.get(route_url).json()
 
         if route_res['status'] == 'OK':
             leg = route_res['routes'][0]['legs'][0]
-            vei_punkter = polyline.decode(route_res['routes'][0]['overview_polyline']['points'])
-            m = folium.Map(location=vei_punkter[0], zoom_start=6)
-            folium.PolyLine(vei_punkter, color="#2196F3", weight=5).add_to(m)
+            alle_punkter = polyline.decode(route_res['routes'][0]['overview_polyline']['points'])
+            total_rute_meter = leg['distance']['value']
+            total_sekunder = leg['duration']['value']
+
+            m = folium.Map(location=alle_punkter[0], zoom_start=6)
+            folium.PolyLine(alle_punkter, color="#2196F3", weight=5).add_to(m)
 
             temp_tabell = []
-            akk_sek, akk_met, neste_sjekk_km, total_delay = 0, 0, 0, 0
+            akk_meter = 0
+            neste_sjekk_meter = 0
+            total_delay_min = 0
 
-            for step in leg['steps']:
-                dist_km = akk_met / 1000
-                if dist_km >= neste_sjekk_km:
-                    passeringstid = avreise_dt + timedelta(seconds=akk_sek + (total_delay * 60))
-                    lat, lon = step['start_location']['lat'], step['start_location']['lng']
+            for i in range(len(alle_punkter) - 1):
+                p1, p2 = alle_punkter[i], alle_punkter[i+1]
+                dist_steg = haversine_distance(p1, p2)
+                
+                if akk_meter >= neste_sjekk_meter:
+                    km_merke = int(neste_sjekk_meter / 1000)
+                    framdrift = akk_meter / total_rute_meter if total_rute_meter > 0 else 0
+                    passeringstid = avreise_dt + timedelta(seconds=(total_sekunder * framdrift) + (total_delay_min * 60))
                     
+                    lat, lon = p1[0], p1[1]
                     vaer = hent_vaer_detaljer(lat, lon, passeringstid)
                     kommune = hent_kommune(lat, lon)
                     hoyde = hent_hoyde(lat, lon)
@@ -139,38 +159,37 @@ if start_knapp:
 
                     folium.Marker(
                         location=[lat, lon],
-                        popup=f"<b>{neste_sjekk_km} km: {kommune}</b><br>{vaer['vaertype']}<br>{vaer['nedbor']} mm",
-                        icon=folium.Icon(color='black' if not er_lyst else 'blue', icon='info-sign')
+                        popup=f"<b>{km_merke} km: {kommune}</b>",
+                        icon=folium.Icon(color='black' if not er_lyst else 'blue')
                     ).add_to(m)
 
                     temp_tabell.append({
-                        "KM": int(neste_sjekk_km),
+                        "KM": km_merke,
                         "Sted": kommune,
                         "Passering": passeringstid.strftime("%H:%M"),
                         "Værtype": vaer['vaertype'],
                         "Lys": lys_tekst,
                         "Nedbør (mm)": vaer['nedbor'],
                         "Temp": f"{vaer['temp']}°C",
-                        "Vind (Kast)": f"{vaer['vind']} ({vaer['kast']})",
                         "Høyde": hoyde,
                         "Risiko": score
                     })
-                    total_delay += (5 if score >= 7 else 0)
-                    neste_sjekk_km += 50
-                akk_met += step['distance']['value']
-                akk_sek += step['duration']['value']
+                    total_delay_min += (5 if score >= 7 else 0)
+                    neste_sjekk_meter += 50000 
+                
+                akk_meter += dist_steg
 
             st.session_state.tabell_data = temp_tabell
             st.session_state.kart_html = m._repr_html_()
 
 # --- 6. VISNING ---
 if st.session_state.get('tabell_data') is not None:
-    st.subheader("🗺️ Reisekart (Sorte markører = mørke)")
+    st.subheader("🗺️ Reisekart (Hver 50. km)")
     components.html(st.session_state.kart_html, height=500)
     
-    st.subheader("📋 Detaljert Veiplan")
     df = pd.DataFrame(st.session_state.tabell_data)
     styler = df.style.apply(fargelegg_rader, axis=1).background_gradient(subset=['Risiko'], cmap='YlOrRd')
+    st.subheader("📋 Detaljert Veiplan")
     st.dataframe(styler, use_container_width=True)
     
     st.subheader("📈 Høydeprofil (moh)")
