@@ -197,4 +197,4 @@ if st.session_state.tabell_data:
     df = pd.DataFrame(st.session_state.tabell_data)
     st.dataframe(df.style.apply(fargelegg_rader, axis=1).background_gradient(subset=['Risiko'], cmap='YlOrRd'), use_container_width=True)
 else:
-    st.info("👋 Velkommen! Skriv inn reiseinfo til venstre. Tid tastes direkte (f.eks. 14:30).")
+    st.info("👋 Velkommen! Skriv inn reiseinfo i fanen til venstre.")
